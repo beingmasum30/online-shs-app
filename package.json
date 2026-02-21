@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "deploy": "netlify deploy --build"
   },
   "dependencies": {
     "@google/genai": "latest",
@@ -18,6 +19,7 @@
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "netlify-cli": "^23.15.1",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
