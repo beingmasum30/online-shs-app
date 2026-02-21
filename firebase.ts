@@ -1,104 +1,145 @@
-import { initializeApp } from "firebase/app";
-import { 
-  getFirestore, 
-  collection, 
-  onSnapshot as firestoreOnSnapshot, 
-  doc, 
-  setDoc,
-  updateDoc,
-  deleteDoc,
-  runTransaction as firestoreRunTransaction,
-  serverTimestamp,
-  query
-} from "firebase/firestore";
-import { getAuth } from "firebase/auth";
-import { getAnalytics } from "firebase/analytics";
+import Gun from 'https://esm.sh/gun@0.2020.1239/gun.js';
 
-// আপনার Firebase কনফিগারেশন
-const firebaseConfig = {
-  apiKey: "AIzaSyAJPnGWWGLje1pULYbqOr8TSd1kTR5Yncc",
-  authDomain: "onlineshs.firebaseapp.com",
-  projectId: "onlineshs",
-  storageBucket: "onlineshs.firebasestorage.app",
-  messagingSenderId: "394635528009",
-  appId: "1:394635528009:web:642b2096c1c28a615b7c98",
-  measurementId: "G-TSFWW6Y93V"
+// Initialize Gun with public relay peers for cross-device/cross-browser sync
+const gun = Gun({
+  peers: [
+    'https://gun-manhattan.herokuapp.com/gun',
+    'https://p2p.xyz/gun'
+  ]
+});
+
+// A unique namespace for this portal to prevent collisions with other Gun users
+const APP_KEY = 'seva_health_service_v3_production_stable';
+const appData = gun.get(APP_KEY);
+
+const initialData: any = {
+  users: [
+    { id: 'SHS', name: 'ADMIN SEVA', role: 'ADMIN', totalPaid: 0, walletBalance: 0, contactNumber: '9988776655', password: '111', address: 'Main Hub, Sector 5', status: 'ACTIVE', isDeleted: false },
+    { id: 'LK01', name: 'L.K DAS', clinicName: 'L.K DAS', role: 'USER', totalPaid: 0, walletBalance: 5000, contactNumber: '9876543210', password: '123', address: 'Kolkata, MG Road', status: 'ACTIVE', isDeleted: false, paymentMode: 'LIMIT', walletLimit: 0 },
+    { id: 'AK02', name: 'AK CLINIC', clinicName: 'AK CLINIC', role: 'USER', totalPaid: 0, walletBalance: 2500, contactNumber: '9123456789', password: '456', address: 'Howrah, Station Rd', status: 'ACTIVE', isDeleted: false, paymentMode: 'DAILY' }
+  ],
+  tests: [
+    { id: 'T001', name: 'CBC (Complete Blood Count)', category: 'HAEMATOLOGY', longLifePrice: 150, thyrocarePrice: 200, mrp: 350 },
+    { id: 'T002', name: 'Lipid Profile', category: 'BIOCHEMISTRY', longLifePrice: 450, thyrocarePrice: 500, mrp: 1200 },
+    { id: 'T003', name: 'Thyroid Profile (T3, T4, TSH)', category: 'IMMUNOLOGY', longLifePrice: 300, thyrocarePrice: 350, mrp: 800 },
+    { id: 'T004', name: 'HbA1c', category: 'DIABETOLOGY', longLifePrice: 250, thyrocarePrice: 280, mrp: 600 }
+  ],
+  orders: [],
+  transactions: [],
+  advertisements: []
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-export const dbInstance = getFirestore(app);
-export const auth = getAuth(app);
+// Local cache to provide synchronous 'get' access
+let localState: any = { ...initialData };
 
-// Analytics (বড় স্ক্রিনে ব্যবহারের জন্য)
-// Analytics is disabled to prevent "Installations" errors with invalid/restricted API keys.
-export const analytics = null;
+const listeners: Record<string, Function[]> = {};
 
-/**
- * অ্যাপের অন্যান্য কম্পোনেন্টের সাথে সামঞ্জস্য রাখার জন্য এক্সপোর্ট
- * (Compatibility Layer for existing AdminDashboard and CustomerDashboard)
- */
-
-let localCache: Record<string, any[]> = {};
-
-// ১. Real-time ডাটা শোনার জন্য onSnapshot
-export const onSnapshot = (collectionName: string, callback: (snap: any) => void) => {
-  const q = query(collection(dbInstance, collectionName));
-  return firestoreOnSnapshot(q, (snapshot) => {
-    const docsData = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-    // Update local cache for db.get compatibility
-    localCache[collectionName] = docsData;
-    
-    // Return compatibility object with 'docs' property
-    callback({
-      docs: snapshot.docs.map(d => ({
-        id: d.id,
-        data: () => ({ id: d.id, ...d.data() })
+const triggerListeners = (collection: string) => {
+  if (listeners[collection]) {
+    const data = Array.isArray(localState[collection]) ? localState[collection] : [];
+    const snap = { 
+      docs: data.map((item: any) => ({
+        data: () => item,
+        id: item.id
       }))
-    });
-  });
+    };
+    listeners[collection].forEach(callback => callback(snap));
+  }
 };
 
-// ২. ডাটা আপডেট বা ডিলিট করার জন্য runTransaction
-export const runTransaction = async (action: any) => {
-  // Support for old function-based signature
-  if (typeof action === 'function') {
-    return await firestoreRunTransaction(dbInstance, async (transaction) => {
-      const tx = {
-        update: (path: string, data: any) => {
-          const [col, id] = path.split(':');
-          transaction.update(doc(dbInstance, col, id), { ...data, updatedAt: serverTimestamp() });
-        },
-        set: (col: string, data: any) => {
-          const id = data.id;
-          if (!id) throw new Error("Document ID is required");
-          transaction.set(doc(dbInstance, col, id), { ...data, createdAt: serverTimestamp() });
-        },
-        delete: (col: string, id: string) => {
-          transaction.delete(doc(dbInstance, col, id));
+// Listen for any changes in the cloud and update local state
+appData.on((data: any) => {
+  if (data) {
+    Object.keys(data).forEach(key => {
+      if (key !== '_' && data[key]) {
+        try {
+          const raw = data[key];
+          const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          
+          // Ensure we always store arrays for known collections
+          if (['users', 'tests', 'orders', 'transactions', 'advertisements'].includes(key)) {
+            localState[key] = Array.isArray(parsed) ? parsed : [];
+          } else {
+            localState[key] = parsed;
+          }
+          
+          if (listeners[key]) {
+            triggerListeners(key);
+          }
+        } catch (e) {
+          // If not valid JSON or unexpected format, ignore or set empty
+          if (['users', 'tests', 'orders', 'transactions', 'advertisements'].includes(key)) {
+             localState[key] = localState[key] || [];
+          }
         }
-      };
-      return await action(tx);
+      }
     });
   }
+});
 
-  // Support for new object-based signature requested by user
-  return await firestoreRunTransaction(dbInstance, async (transaction) => {
-    const docRef = action.id ? doc(dbInstance, action.collection, action.id) : null;
-
-    if (action.type === 'delete' && docRef) {
-      transaction.delete(docRef);
-    } else if (action.type === 'update' && docRef) {
-      transaction.update(docRef, { ...action.data, updatedAt: serverTimestamp() });
-    } else if (action.type === 'set' && docRef) {
-      transaction.set(docRef, { ...action.data, createdAt: serverTimestamp() });
-    }
-  });
-};
-
-// ৩. পুরনো কোডের সাথে মিল রাখার জন্য db অবজেক্ট
 export const db = {
-  get: (collectionName: string) => localCache[collectionName] || []
+  get: (collection: string) => Array.isArray(localState[collection]) ? localState[collection] : [],
 };
 
-export default app;
+export const onSnapshot = (collection: string, callback: any) => {
+  if (!listeners[collection]) listeners[collection] = [];
+  listeners[collection].push(callback);
+  
+  const data = Array.isArray(localState[collection]) ? localState[collection] : [];
+  // Send current state immediately
+  callback({ 
+    docs: data.map((item: any) => ({
+      data: () => item,
+      id: item.id
+    }))
+  });
+
+  return () => {
+    listeners[collection] = listeners[collection].filter(l => l !== callback);
+  };
+};
+
+export const runTransaction = async (action: (tx: any) => Promise<void>) => {
+  const tx = {
+    update: (path: string, data: any) => {
+      const [collection, id] = path.split(':');
+      if (!localState[collection] || !Array.isArray(localState[collection])) return;
+      const idx = localState[collection].findIndex((item: any) => item.id === id);
+      if (idx !== -1) {
+        localState[collection][idx] = { ...localState[collection][idx], ...data };
+        appData.get(collection).put(JSON.stringify(localState[collection]));
+        triggerListeners(collection);
+      }
+    },
+    set: (collection: string, data: any) => {
+      if (!localState[collection] || !Array.isArray(localState[collection])) localState[collection] = [];
+      const idx = localState[collection].findIndex((item: any) => item.id === data.id);
+      if (idx !== -1) {
+        localState[collection][idx] = data;
+      } else {
+        localState[collection].push(data);
+      }
+      appData.get(collection).put(JSON.stringify(localState[collection]));
+      triggerListeners(collection);
+    },
+    delete: (collection: string, id: string) => {
+      if (!localState[collection] || !Array.isArray(localState[collection])) return;
+      localState[collection] = localState[collection].filter((item: any) => item.id !== id);
+      appData.get(collection).put(JSON.stringify(localState[collection]));
+      triggerListeners(collection);
+    }
+  };
+  await action(tx);
+};
+
+// Seed initial data if the database is empty (First run)
+setTimeout(() => {
+  const orders = Array.isArray(localState.orders) ? localState.orders : [];
+  const users = Array.isArray(localState.users) ? localState.users : [];
+  
+  if (orders.length === 0 && users.length <= 3) {
+     Object.keys(initialData).forEach(key => {
+       appData.get(key).put(JSON.stringify(initialData[key]));
+     });
+  }
+}, 3000);
